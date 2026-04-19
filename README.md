@@ -4,6 +4,8 @@
 
 ## tips
 
+先去 [https://www.metoffice.gov.uk/hadobs/hadisst/data/download.html](https://www.metoffice.gov.uk/hadobs/hadisst/data/download.html) 中下载HadISST_sst.nc.gz数据集并解压后放到仓库根目录。
+
 当前提供scripts下的两个脚本：
 
 - scripts\readnc.py可用于读取.nc文件原文

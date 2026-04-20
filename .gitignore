@@ -2,3 +2,8 @@
 .vscode/
 .venv/
 HadISST_sst.nc
+
+outputs/
+
+__pycache__/
+*.py[cod]

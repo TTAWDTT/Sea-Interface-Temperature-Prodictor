@@ -239,20 +239,23 @@ class SSTDataset(Dataset):
     
     def __init__(self, X: np.ndarray, y: np.ndarray, mask: Optional[np.ndarray] = None):
         super().__init__()
-        
+
+        # 先基于原始y构建有效掩膜，再清洗NaN，避免NaN在卷积中扩散导致loss=nan
+        if mask is not None:
+            self.mask = torch.from_numpy(mask).bool()
+        else:
+            y_tensor_raw = torch.from_numpy(y).float().unsqueeze(1)
+            self.mask = torch.isfinite(y_tensor_raw) & (y_tensor_raw > -100)
+
+        # 清洗输入与目标中的NaN/Inf，模型前向与loss只在mask有效区域计算
+        X_clean = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        y_clean = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+
         # 转换为torch张量
         # 注意：我们添加通道维度，变成 (N, C, T, H, W)
         # 对于单变量SST，C=1
-        self.X = torch.from_numpy(X).float().unsqueeze(1)  # (N, 1, T_in, H, W)
-        self.y = torch.from_numpy(y).float().unsqueeze(1)  # (N, 1, T_out, H, W)
-        
-        # 如果有掩膜，也转换
-        if mask is not None:
-            self.mask = torch.from_numpy(mask).float()
-        else:
-            # 如果没有提供掩膜，创建一个基于NaN的掩膜
-            # 假设y中的NaN或极值是掩膜区域
-            self.mask = (~torch.isnan(self.y)) & (self.y > -100)
+        self.X = torch.from_numpy(X_clean).float().unsqueeze(1)  # (N, 1, T_in, H, W)
+        self.y = torch.from_numpy(y_clean).float().unsqueeze(1)  # (N, 1, T_out, H, W)
         
         print(f"Dataset created:")
         print(f"  - X shape: {self.X.shape}")

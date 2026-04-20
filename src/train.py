@@ -503,11 +503,12 @@ def train_one_epoch(
                 # 展平以便计算
                 output_flat = output.view(-1)
                 y_flat = y.view(-1)
-                mask_flat = mask.view(-1)
+                mask_flat = mask.view(-1).bool()
+                valid_idx = mask_flat & torch.isfinite(output_flat) & torch.isfinite(y_flat)
                 
                 # 只在有效像素上计算损失
-                if mask_flat.sum() > 0:
-                    loss = criterion(output_flat[mask_flat], y_flat[mask_flat])
+                if valid_idx.any():
+                    loss = criterion(output_flat[valid_idx], y_flat[valid_idx])
                 else:
                     # 如果没有有效像素，跳过这个batch
                     loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -531,10 +532,11 @@ def train_one_epoch(
             # 计算损失
             output_flat = output.view(-1)
             y_flat = y.view(-1)
-            mask_flat = mask.view(-1)
+            mask_flat = mask.view(-1).bool()
+            valid_idx = mask_flat & torch.isfinite(output_flat) & torch.isfinite(y_flat)
             
-            if mask_flat.sum() > 0:
-                loss = criterion(output_flat[mask_flat], y_flat[mask_flat])
+            if valid_idx.any():
+                loss = criterion(output_flat[valid_idx], y_flat[valid_idx])
             else:
                 loss = torch.tensor(0.0, device=device, requires_grad=True)
             
@@ -613,13 +615,14 @@ def validate(model, val_loader, criterion, device, epoch, args, writer):
             # 计算损失
             output_flat = output.view(-1)
             y_flat = y.view(-1)
-            mask_flat = mask.view(-1)
+            mask_flat = mask.view(-1).bool()
+            valid_idx = mask_flat & torch.isfinite(output_flat) & torch.isfinite(y_flat)
             
-            if mask_flat.sum() > 0:
-                loss = criterion(output_flat[mask_flat], y_flat[mask_flat])
+            if valid_idx.any():
+                loss = criterion(output_flat[valid_idx], y_flat[valid_idx])
                 
                 # 计算RMSE
-                mse = F.mse_loss(output_flat[mask_flat], y_flat[mask_flat])
+                mse = F.mse_loss(output_flat[valid_idx], y_flat[valid_idx])
                 rmse = torch.sqrt(mse)
             else:
                 loss = torch.tensor(0.0, device=device)

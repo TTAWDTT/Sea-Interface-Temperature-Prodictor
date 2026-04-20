@@ -26,6 +26,7 @@ from typing import Dict, Any
 import numpy as np
 import torch
 import xarray as xr
+import matplotlib.pyplot as plt
 
 # 添加src到路径
 sys.path.insert(0, str(Path(__file__).parent))
@@ -96,6 +97,28 @@ def parse_args():
         default=5,
         help='可视化的样本数量'
     )
+
+    parser.add_argument(
+        '--rollout_months',
+        type=int,
+        default=0,
+        help='滚动预测月数（>0时启用自回归滚动预测）'
+    )
+
+    parser.add_argument(
+        '--rollout_start_idx',
+        type=int,
+        default=0,
+        help='滚动预测起始样本索引（基于所选数据集）'
+    )
+
+    parser.add_argument(
+        '--rollout_split',
+        type=str,
+        default='test',
+        choices=['train', 'val', 'test'],
+        help='滚动预测使用的数据集划分'
+    )
     
     parser.add_argument(
         '--batch_size',
@@ -137,7 +160,9 @@ def load_model_from_checkpoint(checkpoint_path: str, device: torch.device):
     print(f"\n加载模型检查点: {checkpoint_path}")
     
     # 加载检查点
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # PyTorch 2.6 起 torch.load 默认 weights_only=True，
+    # 本项目checkpoint包含 argparse.Namespace 等对象，因此需要显式关闭。
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # 获取模型配置
     args = checkpoint['args']
@@ -242,35 +267,46 @@ def save_predictions_to_netcdf(predictions, save_path, dates=None, lat=None, lon
         lat: 纬度数组（可选）
         lon: 经度数组（可选）
     """
-    # 确保 predictions 是 (N, T, H, W) 或 (N, H, W)
-    if predictions.ndim == 4 and predictions.shape[1] == 1:
-        predictions = predictions[:, 0]  # 去除通道维度
-    
-    N, *spatial_dims = predictions.shape
-    
-    # 创建坐标
-    if dates is None:
-        dates = np.arange(N)
-    
-    if len(spatial_dims) == 3:  # (T, H, W)
-        T, H, W = spatial_dims
+    # 支持输入形状:
+    # 1) (N, C, T, H, W)
+    # 2) (N, T, H, W)
+    # 3) (N, H, W)
+    # 4) (T, H, W) - 如rollout结果
+    if predictions.ndim == 5:
+        # 单通道任务，去掉C维
+        if predictions.shape[1] == 1:
+            predictions = predictions[:, 0]  # -> (N, T, H, W)
+        else:
+            raise ValueError(f"不支持多通道预测保存，当前shape={predictions.shape}")
+
+    if predictions.ndim == 4:
+        # 约定为 (N, T, H, W)
+        N, T, H, W = predictions.shape
+        if dates is None:
+            dates = np.arange(N)
         if lat is None:
             lat = np.arange(H)
         if lon is None:
             lon = np.arange(W)
-        
+
         coords = [dates, np.arange(T), lat, lon]
         dims = ['sample', 'time', 'latitude', 'longitude']
-        
-    else:  # (H, W)
-        H, W = spatial_dims
+
+    elif predictions.ndim == 3:
+        # 兼容 (N, H, W) 或 rollout 的 (T, H, W)
+        N, H, W = predictions.shape
+        if dates is None:
+            dates = np.arange(N)
         if lat is None:
             lat = np.arange(H)
         if lon is None:
             lon = np.arange(W)
-        
+
         coords = [dates, lat, lon]
         dims = ['sample', 'latitude', 'longitude']
+
+    else:
+        raise ValueError(f"不支持的预测数组维度: {predictions.ndim}, shape={predictions.shape}")
     
     # 创建DataArray
     da = xr.DataArray(
@@ -289,6 +325,112 @@ def save_predictions_to_netcdf(predictions, save_path, dates=None, lat=None, lon
     ds = da.to_dataset(name='sst')
     ds.to_netcdf(save_path)
     print(f"预测结果已保存: {save_path}")
+
+
+def rollout_forecast(model, init_input, months, device):
+    """
+    自回归滚动预测
+
+    参数:
+        model: 训练好的模型
+        init_input: 初始输入，形状 (1, 1, T_in, H, W)
+        months: 需要滚动预测的月份数
+        device: 设备
+
+    返回:
+        rollout_pred: 预测结果，形状 (1, 1, months, H, W)
+    """
+    model.eval()
+
+    current = init_input.to(device)
+    preds = []
+
+    with torch.no_grad():
+        for _ in range(months):
+            out = model(current)  # (1, 1, T_out, H, W)
+
+            # 使用第一个预测步进行自回归，兼容output_months=1和>1的模型
+            next_step = out[:, :, 0:1, :, :]
+            preds.append(next_step.cpu())
+
+            # 滑动窗口：丢弃最早1个月，拼接最新预测1个月
+            current = torch.cat([current[:, :, 1:, :, :], next_step.to(device)], dim=2)
+
+    rollout_pred = torch.cat(preds, dim=2)  # (1, 1, months, H, W)
+    return rollout_pred
+
+
+def compute_metrics_np(pred, target, mask=None):
+    """在numpy数组上计算RMSE/MAE/ACC。"""
+    if mask is None:
+        valid = np.isfinite(pred) & np.isfinite(target)
+    else:
+        valid = mask.astype(bool) & np.isfinite(pred) & np.isfinite(target)
+
+    if not np.any(valid):
+        return {
+            'rmse': float('nan'),
+            'mae': float('nan'),
+            'acc': float('nan'),
+            'valid_points': 0
+        }
+
+    p = pred[valid]
+    t = target[valid]
+
+    rmse = np.sqrt(np.mean((p - t) ** 2))
+    mae = np.mean(np.abs(p - t))
+
+    p_anom = p - np.mean(p)
+    t_anom = t - np.mean(t)
+    denom = np.sqrt(np.sum(p_anom ** 2)) * np.sqrt(np.sum(t_anom ** 2))
+    if denom <= 1e-12:
+        acc = 0.0
+    else:
+        acc = np.sum(p_anom * t_anom) / denom
+
+    return {
+        'rmse': float(rmse),
+        'mae': float(mae),
+        'acc': float(acc),
+        'valid_points': int(valid.sum())
+    }
+
+
+def plot_rollout_metrics(per_month_metrics, save_path):
+    """绘制滚动预测逐月评估曲线。"""
+    if not per_month_metrics:
+        return
+
+    months = [m['month_ahead'] for m in per_month_metrics]
+    rmse = [m['rmse'] for m in per_month_metrics]
+    mae = [m['mae'] for m in per_month_metrics]
+    acc = [m['acc'] for m in per_month_metrics]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    axes[0].plot(months, rmse, marker='o', linewidth=2)
+    axes[0].set_title('RMSE by Lead Month')
+    axes[0].set_xlabel('Month Ahead')
+    axes[0].set_ylabel('RMSE (degC)')
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(months, mae, marker='o', linewidth=2, color='tab:orange')
+    axes[1].set_title('MAE by Lead Month')
+    axes[1].set_xlabel('Month Ahead')
+    axes[1].set_ylabel('MAE (degC)')
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(months, acc, marker='o', linewidth=2, color='tab:green')
+    axes[2].set_title('ACC by Lead Month')
+    axes[2].set_xlabel('Month Ahead')
+    axes[2].set_ylabel('ACC')
+    axes[2].set_ylim(-1.0, 1.0)
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
 
 def main():
@@ -335,6 +477,12 @@ def main():
     
     test_loader = data_result['test_loader']
     processor = data_result['processor']
+
+    split_to_dataset = {
+        'train': data_result['train_dataset'],
+        'val': data_result['val_dataset'],
+        'test': data_result['test_dataset']
+    }
     
     # 步骤3: 在测试集上进行预测
     print("\n在测试集上进行预测...")
@@ -426,6 +574,110 @@ def main():
             )
         
         print(f"已保存 {num_samples} 个可视化样本到: {vis_dir}")
+
+    # 步骤7: 自回归滚动预测（可选）
+    if args.rollout_months > 0:
+        print("\n执行自回归滚动预测...")
+
+        rollout_dataset = split_to_dataset[args.rollout_split]
+        if len(rollout_dataset) == 0:
+            raise ValueError(f"{args.rollout_split} 数据集为空，无法执行滚动预测")
+
+        idx = max(0, min(args.rollout_start_idx, len(rollout_dataset) - 1))
+        X0, _, _ = rollout_dataset[idx]
+
+        # dataset返回形状为 (1, T_in, H, W)，补batch维
+        init_input = X0.unsqueeze(0)
+
+        rollout_pred = rollout_forecast(
+            model=model,
+            init_input=init_input,
+            months=args.rollout_months,
+            device=device
+        )
+
+        # 预测结果（归一化尺度）：(months, H, W)
+        rollout_pred_norm = rollout_pred.numpy()[0, 0]
+
+        # 获取可用于评估的真实未来序列（同一split下相邻样本对应未来逐月真值）
+        max_eval_months = max(0, len(rollout_dataset) - idx)
+        eval_months = min(args.rollout_months, max_eval_months)
+
+        if eval_months <= 0:
+            print("⚠️ 当前起始索引后无可用真实值，跳过滚动预测精度评估")
+            rollout_target_norm = None
+            rollout_mask = None
+        else:
+            rollout_target_norm = rollout_dataset.y[idx:idx + eval_months, 0, 0].cpu().numpy()
+            rollout_mask = rollout_dataset.mask[idx:idx + eval_months, 0, 0].cpu().numpy().astype(bool)
+
+        # 反归一化（便于用°C解释指标）
+        if hasattr(processor, 'stats') and processor.stats['mean'] is not None:
+            mean = processor.stats['mean']
+            std = processor.stats['std']
+            rollout_pred_np = rollout_pred_norm * std + mean
+            if rollout_target_norm is not None:
+                rollout_target_np = rollout_target_norm * std + mean
+            else:
+                rollout_target_np = None
+        else:
+            rollout_pred_np = rollout_pred_norm
+            rollout_target_np = rollout_target_norm
+
+        rollout_path = output_dir / f'rollout_{args.rollout_split}_idx{idx}_{args.rollout_months}m.nc'
+        save_predictions_to_netcdf(rollout_pred_np, str(rollout_path))
+
+        # 保存对齐的真实值（仅保存可评估部分）
+        if rollout_target_np is not None:
+            rollout_target_path = output_dir / f'rollout_target_{args.rollout_split}_idx{idx}_{eval_months}m.nc'
+            save_predictions_to_netcdf(rollout_target_np, str(rollout_target_path))
+
+            overall_metrics = compute_metrics_np(
+                rollout_pred_np[:eval_months],
+                rollout_target_np,
+                rollout_mask
+            )
+
+            per_month_metrics = []
+            for m in range(eval_months):
+                m_metrics = compute_metrics_np(
+                    rollout_pred_np[m],
+                    rollout_target_np[m],
+                    rollout_mask[m]
+                )
+                m_metrics['month_ahead'] = m + 1
+                per_month_metrics.append(m_metrics)
+
+            rollout_metrics = {
+                'split': args.rollout_split,
+                'start_idx': int(idx),
+                'requested_months': int(args.rollout_months),
+                'evaluated_months': int(eval_months),
+                'overall': overall_metrics,
+                'per_month': per_month_metrics
+            }
+
+            import json
+            rollout_metrics_path = output_dir / f'rollout_metrics_{args.rollout_split}_idx{idx}_{eval_months}m.json'
+            with open(rollout_metrics_path, 'w', encoding='utf-8') as f:
+                json.dump(rollout_metrics, f, indent=4, ensure_ascii=False)
+
+            rollout_plot_path = output_dir / f'rollout_metrics_plot_{args.rollout_split}_idx{idx}_{eval_months}m.png'
+            plot_rollout_metrics(per_month_metrics, str(rollout_plot_path))
+
+            print("滚动预测精度评估:")
+            print(f"  - 评估月数: {eval_months}")
+            print(f"  - Overall RMSE: {overall_metrics['rmse']:.4f}°C")
+            print(f"  - Overall MAE: {overall_metrics['mae']:.4f}°C")
+            print(f"  - Overall ACC: {overall_metrics['acc']:.4f}")
+            print(f"  - 逐月指标文件: {rollout_metrics_path}")
+            print(f"  - 指标曲线图: {rollout_plot_path}")
+
+        print("滚动预测完成:")
+        print(f"  - 数据集: {args.rollout_split}")
+        print(f"  - 起始样本索引: {idx}")
+        print(f"  - 预测月数: {args.rollout_months}")
+        print(f"  - 结果文件: {rollout_path}")
     
     # 完成
     print("\n" + "=" * 70)

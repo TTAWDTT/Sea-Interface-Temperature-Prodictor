@@ -1,0 +1,163 @@
+# 3D Swin Transformer 默认配置文件
+# ================================
+# 使用方法:
+#   python src/train.py --config configs/config.yaml
+# 或覆盖某些参数:
+#   python src/train.py --config configs/config.yaml --batch_size 4 --epochs 100
+
+# ==========================================
+# 数据相关参数
+# ==========================================
+
+# 数据文件路径 (相对于项目根目录或绝对路径)
+data_path: "HadISST_sst.nc"
+
+# 输入时间序列长度（过去多少个月）
+input_months: 12
+
+# 输出时间序列长度（预测多少个月）
+output_months: 1
+
+# 批次大小
+# 注意: 如果显存不足，请减小此值
+batch_size: 2
+
+# 数据加载线程数
+# Windows系统建议设置为0
+num_workers: 0
+
+# 训练集比例
+train_ratio: 0.7
+
+# 验证集比例（测试集 = 1 - train_ratio - val_ratio）
+val_ratio: 0.15
+
+# 数据归一化方法
+# 可选: 'zscore' (Z-score标准化), 'minmax' (Min-Max归一化), 'none' (不归一化)
+normalize_method: "zscore"
+
+# 空间降采样因子
+# 1 = 不降采样 (使用原始分辨率 180x360)
+# 2 = 降采样到 90x180
+# 4 = 降采样到 45x90 (推荐用于快速实验)
+spatial_downsample: 4
+
+# 时间范围筛选（可选，设为null表示使用全部数据）
+# 格式: ['YYYY-MM', 'YYYY-MM']
+# time_range: ['1980-01', '2020-12']
+time_range: null
+
+# ==========================================
+# 模型相关参数
+# ==========================================
+
+# 预定义的模型类型
+# 'tiny': 小型模型（约28M参数）
+# 'small': 中型模型（约50M参数）
+# 'base': 大型模型（约88M参数）
+# 'custom': 自定义（使用下面的详细参数）
+model_type: "tiny"
+
+# 以下参数仅在 model_type='custom' 时使用
+
+# 3D Patch大小 (时间, 高度, 宽度)
+patch_size: [2, 4, 4]
+
+# 初始嵌入维度
+embed_dim: 96
+
+# 每个stage的深度（block数量）
+# 例如: [2, 2, 6, 2] 表示4个stage，分别有2,2,6,2个block
+depths: [2, 2, 6, 2]
+
+# 每个stage的注意力头数
+num_heads: [3, 6, 12, 24]
+
+# 3D窗口大小 (时间, 高度, 宽度)
+window_size: [2, 7, 7]
+
+# MLP隐藏层维度与输入维度的比例
+mlp_ratio: 4.0
+
+# 是否在QKV投影中使用偏置
+qkv_bias: true
+
+# Dropout率
+drop_rate: 0.0
+
+# 注意力Dropout率
+attn_drop_rate: 0.0
+
+# 随机深度率（全局）
+# 用于随机深度正则化（Stochastic Depth）
+# 值越大，丢弃的层越多
+# 建议: 0.0-0.5
+drop_path_rate: 0.1
+
+# 输出维度（通常是1，表示SST）
+output_dim: 1
+
+# ==========================================
+# 训练相关参数
+# ==========================================
+
+# 训练轮数
+epochs: 50
+
+# 初始学习率
+lr: 0.0001
+
+# 权重衰减（L2正则化）
+weight_decay: 0.05
+
+# 优化器类型
+# 'adam': Adam优化器
+# 'adamw': AdamW优化器（推荐，使用了正确的权重衰减实现）
+# 'sgd': SGD优化器
+optimizer: "adamw"
+
+# 学习率调度器类型
+# 'step': 阶梯式衰减（每step_size轮衰减gamma倍）
+# 'cosine': 余弦退火（平滑下降到eta_min）
+# 'plateau': 基于验证损失的平台调度（验证损失不下降时衰减）
+# 'none': 不使用调度器（固定学习率）
+scheduler: "cosine"
+
+# 是否使用混合精度训练（FP16）
+# 可以加速训练并减少显存占用
+# 需要GPU支持
+fp16: false
+
+# ==========================================
+# 日志和保存相关参数
+# ==========================================
+
+# 输出目录（相对于项目根目录）
+output_dir: "outputs"
+
+# 实验名称（默认为时间戳）
+# 如果为null，将自动生成（格式: YYYYMMDD_HHMMSS）
+exp_name: null
+
+# 每隔多少轮保存一次检查点
+save_freq: 5
+
+# 每隔多少批次记录一次日志（到TensorBoard）
+log_freq: 10
+
+# 每隔多少轮验证一次
+eval_freq: 1
+
+# ==========================================
+# 其他参数
+# ==========================================
+
+# 随机种子（为了结果可复现）
+seed: 42
+
+# 从检查点恢复训练（检查点文件路径）
+# 如果为null，从头开始训练
+resume: null
+
+# 是否仅测试（不训练）
+test_only: false

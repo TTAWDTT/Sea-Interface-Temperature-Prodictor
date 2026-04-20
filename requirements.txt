@@ -1,0 +1,95 @@
+# 项目依赖包列表
+# 安装命令: pip install -r requirements.txt
+
+# ==================== 核心依赖 ====================
+# PyTorch - 深度学习框架（请根据CUDA版本选择）
+# 访问 https://pytorch.org/get-started/locally/ 获取适合你系统的安装命令
+# 示例（CUDA 11.8）: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+torch>=1.12.0
+torchvision>=0.13.0
+
+# NumPy - 数值计算
+numpy>=1.21.0,<2.0
+
+# ==================== 数据处理 ====================
+# xarray - 处理NetCDF数据
+xarray>=0.20.0
+
+# netCDF4 - NetCDF文件读写
+netCDF4>=1.5.8
+
+# Pandas - 数据处理（可选，用于数据分析）
+pandas>=1.3.0
+
+# SciPy - 科学计算（用于降采样等）
+scipy>=1.7.0
+
+# ==================== 模型和训练 ====================
+# einops - 张量操作（用于Swin Transformer）
+einops>=0.4.0
+
+# PyTorch Lightning - 简化训练流程（可选）
+pytorch-lightning>=1.6.0
+
+# timm - 图像模型库（包含Swin Transformer预训练权重，可选）
+timm>=0.6.0
+
+# ==================== 可视化和日志 ====================
+# Matplotlib - 绘图
+matplotlib>=3.4.0
+
+# TensorBoard - 训练可视化
+tensorboard>=2.8.0
+
+# Seaborn - 统计数据可视化（可选）
+seaborn>=0.11.0
+
+# ==================== 配置和工具 ====================
+# PyYAML - YAML配置文件解析
+pyyaml>=5.4.0
+
+# TQDM - 进度条（可选，但推荐）
+tqdm>=4.62.0
+
+# Pillow - 图像处理（可选）
+Pillow>=9.0.0
+
+# ==================== 开发工具（可选） ====================
+# Jupyter - 交互式开发
+jupyter>=1.0.0
+ipython>=8.0.0
+
+# 代码格式化
+black>=22.0.0
+isort>=5.10.0
+
+# 类型检查
+mypy>=0.950
+
+# 调试工具
+ipdb>=0.13.0
+
+# ==================== 注意事项 ====================
+# 1. PyTorch安装：
+#    请访问 https://pytorch.org/get-started/locally/ 选择适合你系统的版本
+#    CUDA版本可以通过 nvidia-smi 命令查看
+#
+# 2. NetCDF4安装问题（Windows）：
+#    如果安装失败，可以尝试：
+#    pip install netCDF4 --only-binary :all:
+#    或者使用conda：
+#    conda install -c conda-forge netCDF4
+#
+# 3. 版本兼容性：
+#    本项目在Python 3.8+和PyTorch 1.12+上测试通过
+#
+# 4. 内存需求：
+#    最小8GB RAM（16GB+推荐）
+#    最小4GB显存（8GB+推荐）用于GPU训练
+#
+# 5. 安装命令总结：
+#    pip install -r requirements.txt
+#
+#    或者分步安装：
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+#    pip install xarray netCDF4 numpy matplotlib pyyaml einops tensorboard

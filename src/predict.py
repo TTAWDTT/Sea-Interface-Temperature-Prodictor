@@ -24,9 +24,11 @@ from pathlib import Path
 from typing import Dict, Any
 
 import numpy as np
+import pandas as pd
 import torch
 import xarray as xr
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # 添加src到路径
 sys.path.insert(0, str(Path(__file__).parent))
@@ -119,6 +121,13 @@ def parse_args():
         choices=['train', 'val', 'test'],
         help='滚动预测使用的数据集划分'
     )
+
+    parser.add_argument(
+        '--direct_checkpoints',
+        nargs='+',
+        default=None,
+        help='用于对比的直接多步预测checkpoint列表（例如 2/4/6/12个月模型）'
+    )
     
     parser.add_argument(
         '--batch_size',
@@ -193,6 +202,13 @@ def load_model_from_checkpoint(checkpoint_path: str, device: torch.device):
     print(f"  - 最佳验证RMSE: {checkpoint.get('best_val_rmse', 'N/A')}")
     
     return model, checkpoint
+
+
+def load_checkpoint_metadata(checkpoint_path: str):
+    """只读取checkpoint元信息，用于对比模式预检查。"""
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    args = checkpoint['args']
+    return checkpoint, args
 
 
 def predict_on_dataset(model, dataloader, device, processor):
@@ -360,6 +376,98 @@ def rollout_forecast(model, init_input, months, device):
     return rollout_pred
 
 
+def rollout_forecast_batch(model, init_input, months, device, oracle_targets=None):
+    """
+    对一个batch做滚动预测；如果提供oracle_targets，则后续步使用真实值驱动。
+
+    参数:
+        model: 训练好的模型
+        init_input: 输入张量 (B, 1, T_in, H, W)
+        months: 滚动步数
+        device: 设备
+        oracle_targets: 可选真实序列 (B, 1, months, H, W)
+
+    返回:
+        rollout_pred: (B, 1, months, H, W)
+    """
+    model.eval()
+    current = init_input.to(device)
+    preds = []
+
+    with torch.no_grad():
+        for step in range(months):
+            out = model(current)
+            next_step = out[:, :, 0:1, :, :]
+            preds.append(next_step.cpu())
+
+            if oracle_targets is not None:
+                next_input = oracle_targets[:, :, step:step + 1, :, :].to(device)
+            else:
+                next_input = next_step.to(device)
+
+            current = torch.cat([current[:, :, 1:, :, :], next_input], dim=2)
+
+    return torch.cat(preds, dim=2)
+
+
+def oracle_rollout_forecast(model, init_input, future_truth_steps, device):
+    """
+    使用真实未来值作为下一步输入的 oracle rollout。
+
+    参数:
+        model: 训练好的模型
+        init_input: 初始输入，形状 (1, 1, T_in, H, W)
+        future_truth_steps: 真实未来步，形状 (1, 1, months, H, W)
+        device: 设备
+
+    返回:
+        oracle_pred: 预测结果，形状 (1, 1, months, H, W)
+    """
+    model.eval()
+
+    current = init_input.to(device)
+    preds = []
+    months = future_truth_steps.shape[2]
+
+    with torch.no_grad():
+        for step_idx in range(months):
+            out = model(current)
+            next_pred = out[:, :, 0:1, :, :]
+            preds.append(next_pred.cpu())
+
+            truth_step = future_truth_steps[:, :, step_idx:step_idx + 1, :, :].to(device)
+            current = torch.cat([current[:, :, 1:, :, :], truth_step], dim=2)
+
+    oracle_pred = torch.cat(preds, dim=2)
+    return oracle_pred
+
+
+def denormalize_numpy(data_np, processor):
+    """按数据处理器统计量反归一化numpy数组。"""
+    if hasattr(processor, 'stats') and processor.stats['mean'] is not None:
+        mean = processor.stats['mean']
+        std = processor.stats['std']
+        return data_np * std + mean
+    return data_np
+
+
+def extract_horizon_sample(dataset, start_idx, horizon):
+    """取滚动比较中第 horizon 个提前期对应的真实样本。"""
+    sample_idx = start_idx + horizon - 1
+    if sample_idx >= len(dataset):
+        raise IndexError(f"样本索引越界: start_idx={start_idx}, horizon={horizon}, dataset_len={len(dataset)}")
+    return dataset[sample_idx]
+
+
+def build_future_truth_steps(dataset, start_idx, months):
+    """构建 oracle rollout 需要的连续真实未来步。"""
+    truth_steps = []
+    for offset in range(months):
+        _, y_step, _ = dataset[start_idx + offset]
+        truth_steps.append(y_step.unsqueeze(2))
+    return torch.cat(truth_steps, dim=2)
+
+
 def compute_metrics_np(pred, target, mask=None):
     """在numpy数组上计算RMSE/MAE/ACC。"""
     if mask is None:
@@ -395,6 +503,146 @@ def compute_metrics_np(pred, target, mask=None):
         'acc': float(acc),
         'valid_points': int(valid.sum())
     }
+
+
+def save_comparison_plot(df, save_path):
+    """保存各方法在不同horizon上的RMSE/MAE/ACC对比图。"""
+    if df.empty:
+        return
+
+    horizons = sorted(df['horizon'].unique())
+    methods = ['direct', 'rollout', 'oracle']
+    colors = {'direct': 'tab:blue', 'rollout': 'tab:orange', 'oracle': 'tab:green'}
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+    for method in methods:
+        sub = df[df['method'] == method].sort_values('horizon')
+        if sub.empty:
+            continue
+        axes[0].plot(sub['horizon'], sub['rmse'], marker='o', linewidth=2, label=method, color=colors[method])
+        axes[1].plot(sub['horizon'], sub['mae'], marker='o', linewidth=2, label=method, color=colors[method])
+        axes[2].plot(sub['horizon'], sub['acc'], marker='o', linewidth=2, label=method, color=colors[method])
+
+    axes[0].set_title('RMSE Comparison')
+    axes[0].set_xlabel('Horizon (months)')
+    axes[0].set_ylabel('RMSE (degC)')
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].set_title('MAE Comparison')
+    axes[1].set_xlabel('Horizon (months)')
+    axes[1].set_ylabel('MAE (degC)')
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].set_title('ACC Comparison')
+    axes[2].set_xlabel('Horizon (months)')
+    axes[2].set_ylabel('ACC')
+    axes[2].set_ylim(-1.0, 1.0)
+    axes[2].grid(True, alpha=0.3)
+
+    axes[0].legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def evaluate_last_step_metrics(pred_seq, target_seq, mask_seq, horizon):
+    """只评估第horizon个月（1-based）的指标。"""
+    pred_last = pred_seq[:, :, horizon - 1, :, :].cpu().numpy()
+    target_last = target_seq[:, :, horizon - 1, :, :].cpu().numpy()
+    mask_last = mask_seq[:, :, horizon - 1, :, :].cpu().numpy()
+    return compute_metrics_np(pred_last, target_last, mask_last)
+
+
+def compare_horizon_methods(base_model, direct_checkpoints, dataloader, device, output_dir, processor):
+    """比较直接多步模型、自由滚动和oracle滚动在不同horizon上的表现。"""
+    comparison_rows = []
+
+    # 先加载直接模型和其对应horizon
+    direct_entries = []
+    for ckpt_path in direct_checkpoints:
+        direct_model, direct_ckpt = load_model_from_checkpoint(ckpt_path, device)
+        horizon = int(getattr(direct_ckpt['args'], 'output_months', 1))
+        direct_entries.append((horizon, ckpt_path, direct_model))
+
+    direct_entries.sort(key=lambda x: x[0])
+
+    for horizon, ckpt_path, direct_model in direct_entries:
+        print(f"\n评估 horizon={horizon} 的直接模型: {ckpt_path}")
+
+        direct_predictions = []
+        rollout_predictions = []
+        oracle_predictions = []
+        targets_list = []
+        masks_list = []
+
+        with torch.no_grad():
+            for batch_idx, (X, y, mask) in enumerate(dataloader):
+                X = X.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
+                mask = mask.to(device, non_blocking=True)
+
+                direct_pred = direct_model(X)
+                rollout_pred = rollout_forecast_batch(base_model, X, horizon, device)
+                oracle_pred = rollout_forecast_batch(base_model, X, horizon, device, oracle_targets=y)
+
+                direct_predictions.append(direct_pred[:, :, horizon - 1].cpu())
+                rollout_predictions.append(rollout_pred[:, :, horizon - 1].cpu())
+                oracle_predictions.append(oracle_pred[:, :, horizon - 1].cpu())
+                targets_list.append(y[:, :, horizon - 1].cpu())
+                masks_list.append(mask[:, :, horizon - 1].cpu())
+
+                if (batch_idx + 1) % 10 == 0 or batch_idx == len(dataloader) - 1:
+                    print(f"\r比较进度: [{batch_idx+1}/{len(dataloader)}]", end='', flush=True)
+
+        print()
+
+        direct_pred_np = denormalize_numpy(torch.cat(direct_predictions, dim=0).numpy(), processor)
+        rollout_pred_np = denormalize_numpy(torch.cat(rollout_predictions, dim=0).numpy(), processor)
+        oracle_pred_np = denormalize_numpy(torch.cat(oracle_predictions, dim=0).numpy(), processor)
+        target_np = denormalize_numpy(torch.cat(targets_list, dim=0).numpy(), processor)
+        mask_np = torch.cat(masks_list, dim=0).numpy()
+
+        direct_metrics = compute_metrics_np(direct_pred_np, target_np, mask_np)
+        rollout_metrics = compute_metrics_np(rollout_pred_np, target_np, mask_np)
+        oracle_metrics = compute_metrics_np(oracle_pred_np, target_np, mask_np)
+
+        comparison_rows.extend([
+            {
+                'method': 'direct',
+                'horizon': horizon,
+                'checkpoint': ckpt_path,
+                **direct_metrics,
+            },
+            {
+                'method': 'rollout',
+                'horizon': horizon,
+                'checkpoint': str(base_model.__class__.__name__),
+                **rollout_metrics,
+            },
+            {
+                'method': 'oracle',
+                'horizon': horizon,
+                'checkpoint': str(base_model.__class__.__name__),
+                **oracle_metrics,
+            },
+        ])
+
+    df = pd.DataFrame(comparison_rows).sort_values(['horizon', 'method'])
+    csv_path = output_dir / 'horizon_comparison.csv'
+    json_path = output_dir / 'horizon_comparison.json'
+    plot_path = output_dir / 'horizon_comparison.png'
+
+    df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+    df.to_json(json_path, orient='records', force_ascii=False, indent=4)
+    save_comparison_plot(df, plot_path)
+
+    print("\n对比结果摘要:")
+    print(df[['method', 'horizon', 'rmse', 'mae', 'acc', 'valid_points']].to_string(index=False))
+    print(f"\n对比表已保存: {csv_path}")
+    print(f"对比JSON已保存: {json_path}")
+    print(f"对比图已保存: {plot_path}")
+
+    return df
 
 
 def plot_rollout_metrics(per_month_metrics, save_path):
@@ -459,6 +707,53 @@ def main():
     # 步骤1: 加载模型
     model, checkpoint = load_model_from_checkpoint(args.checkpoint, device)
     print_model_info(model, verbose=False)
+
+    # 如果提供了多个直接多步预测checkpoint，则进入对比模式
+    if args.direct_checkpoints:
+        print("\n进入 horizon 对比模式...")
+
+        direct_horizons = []
+        for ckpt_path in args.direct_checkpoints:
+            _, ckpt_args = load_checkpoint_metadata(ckpt_path)
+            horizon = int(getattr(ckpt_args, 'output_months', 1))
+            direct_horizons.append(horizon)
+            print(f"  - 直接模型: {ckpt_path} -> horizon={horizon}")
+
+        max_compare_horizon = max([1] + direct_horizons)
+        print(f"  - 对比数据集最大提前期: {max_compare_horizon} 个月")
+
+        print("\n准备对比数据...")
+        data_result = create_data_loaders(
+            data_path=args.data_path,
+            input_months=12,
+            output_months=max_compare_horizon,
+            batch_size=args.batch_size,
+            num_workers=0,
+            train_ratio=0.7,
+            val_ratio=0.15,
+            normalize_method='zscore',
+            spatial_downsample=args.spatial_downsample,
+            time_range=None
+        )
+
+        compare_loader = data_result['test_loader']
+        processor = data_result['processor']
+
+        compare_horizon_methods(
+            base_model=model,
+            direct_checkpoints=args.direct_checkpoints,
+            dataloader=compare_loader,
+            device=device,
+            output_dir=output_dir,
+            processor=processor
+        )
+
+        print("\n" + "=" * 70)
+        print("对比完成！")
+        print("=" * 70)
+        print(f"输出目录: {output_dir}")
+        print("=" * 70)
+        return
     
     # 步骤2: 准备数据
     print("\n准备数据...")
